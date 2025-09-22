@@ -440,13 +440,8 @@ class AppState extends ChangeNotifier {
       scheduledWorkingMinutes: scheduledWorkingMinutes,
     );
 
-    if (_useFirestore) {
-      final docRef = _firestore.collection('employees').doc(trimmedId);
+    final docRef = _firestore.collection('employees').doc(trimmedId);
       await docRef.set(employee.toFirestore());
-    } else {
-      _employees.add(employee);
-      notifyListeners();
-    }
     return employee;
   }
 
@@ -1346,6 +1341,7 @@ class EmployeeManagementTab extends StatelessWidget {
     return Consumer<AppState>(
       builder: (context, appState, _) {
         final employees = appState.employees;
+        final theme = Theme.of(context);
         return ListView(
           padding: const EdgeInsets.all(16),
           children: [

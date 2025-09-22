@@ -11,32 +11,32 @@ class DefaultFirebaseOptions {
   static FirebaseOptions get currentPlatform {
     if (kIsWeb) {
       return const FirebaseOptions(
-        apiKey: 'YOUR_WEB_API_KEY',
-        appId: 'YOUR_WEB_APP_ID',
-        messagingSenderId: 'YOUR_WEB_MESSAGING_SENDER_ID',
-        projectId: 'YOUR_PROJECT_ID',
-        authDomain: 'YOUR_WEB_AUTH_DOMAIN',
-        storageBucket: 'YOUR_STORAGE_BUCKET',
+        apiKey: 'AIzaSyAPi19WCO5hsd-AKq491SSckHirxrTSuiI',
+        appId: '1:401251291991:web:e35bc038aa7622baab6412',
+        messagingSenderId: '401251291991',
+        projectId: 'monitoring-sheet-b72bd',
+        authDomain: 'monitoring-sheet-b72bd.firebaseapp.com',
+        storageBucket: 'monitoring-sheet-b72bd.firebasestorage.app',
       );
     }
 
     switch (defaultTargetPlatform) {
       case TargetPlatform.android:
         return const FirebaseOptions(
-          apiKey: 'YOUR_ANDROID_API_KEY',
-          appId: 'YOUR_ANDROID_APP_ID',
-          messagingSenderId: 'YOUR_ANDROID_MESSAGING_SENDER_ID',
-          projectId: 'YOUR_PROJECT_ID',
-          storageBucket: 'YOUR_STORAGE_BUCKET',
+          apiKey: 'AIzaSyAPi19WCO5hsd-AKq491SSckHirxrTSuiI',
+          appId: '1:401251291991:android:5c5b5b5b5b5b5b5b',
+          messagingSenderId: '401251291991',
+          projectId: 'monitoring-sheet-b72bd',
+          storageBucket: 'monitoring-sheet-b72bd.firebasestorage.app',
         );
       case TargetPlatform.iOS:
       case TargetPlatform.macOS:
         return const FirebaseOptions(
-          apiKey: 'YOUR_IOS_API_KEY',
-          appId: 'YOUR_IOS_APP_ID',
-          messagingSenderId: 'YOUR_IOS_MESSAGING_SENDER_ID',
-          projectId: 'YOUR_PROJECT_ID',
-          storageBucket: 'YOUR_STORAGE_BUCKET',
+          apiKey: 'AIzaSyAPi19WCO5hsd-AKq491SSckHirxrTSuiI',
+          appId: '1:401251291991:ios:5c5b5b5b5b5b5b5b',
+          messagingSenderId: '401251291991',
+          projectId: 'monitoring-sheet-b72bd',
+          storageBucket: 'monitoring-sheet-b72bd.firebasestorage.app',
           iosBundleId: 'com.example.app',
         );
       case TargetPlatform.windows:
