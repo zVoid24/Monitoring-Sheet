@@ -10,19 +10,23 @@ import 'firebase_options.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  var firestoreAvailable = true;
+  String? initializationError;
   try {
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
     );
-  } on Exception catch (error) {
-    firestoreAvailable = false;
-    debugPrint('Firebase initialization failed: $error');
+  } on Exception catch (error, stackTrace) {
+    initializationError = 'Firebase initialization failed: $error';
+    debugPrint(initializationError);
+    debugPrintStack(stackTrace: stackTrace);
   }
 
   runApp(
     ChangeNotifierProvider(
-      create: (_) => AppState(useFirestore: firestoreAvailable),
+      create: (_) => AppState(
+        useFirestore: initializationError == null,
+        initializationError: initializationError,
+      ),
       child: const MonitoringSheetApp(),
     ),
   );
@@ -258,19 +262,21 @@ class AppState extends ChangeNotifier {
   AppState({
     bool useFirestore = true,
     FirebaseFirestore? firestore,
-  })  : _useFirestore = useFirestore,
-        _firestore = firestore ?? FirebaseFirestore.instance {
+    String? initializationError,
+  }) : _useFirestore = useFirestore {
     if (_useFirestore) {
+      _firestore = firestore ?? FirebaseFirestore.instance;
       _initializeFirestoreListeners();
     } else {
-      _seedData();
+      _loadError = initializationError ??
+          'Unable to initialize Firebase. Please check your Firebase configuration.';
       _employeesLoaded = true;
       _attendanceLoaded = true;
     }
   }
 
   final bool _useFirestore;
-  final FirebaseFirestore _firestore;
+  late final FirebaseFirestore _firestore;
 
   final List<ManagementAccount> _managementAccounts = const [
     ManagementAccount(
@@ -289,9 +295,6 @@ class AppState extends ChangeNotifier {
   bool _employeesLoaded = false;
   bool _attendanceLoaded = false;
   String? _loadError;
-  int _attendanceSequence = 0;
-
-  bool get usesFirestore => _useFirestore;
 
   bool get isLoading =>
       _useFirestore && (!_employeesLoaded || !_attendanceLoaded);
@@ -440,8 +443,14 @@ class AppState extends ChangeNotifier {
       scheduledWorkingMinutes: scheduledWorkingMinutes,
     );
 
+    if (!_useFirestore) {
+      throw const StateError(
+        'Unable to add employees because Firestore is not available.',
+      );
+    }
+
     final docRef = _firestore.collection('employees').doc(trimmedId);
-      await docRef.set(employee.toFirestore());
+    await docRef.set(employee.toFirestore());
     return employee;
   }
 
@@ -475,11 +484,15 @@ class AppState extends ChangeNotifier {
         ? AttendanceStatus.pending
         : AttendanceStatus.approved;
 
-    final recordId = _useFirestore ? null : _nextAttendanceId();
-    final docRef =
-        _useFirestore ? _firestore.collection('attendance').doc() : null;
+    if (!_useFirestore) {
+      throw const StateError(
+        'Unable to add attendance because Firestore is not available.',
+      );
+    }
+
+    final docRef = _firestore.collection('attendance').doc();
     final attendance = AttendanceRecord(
-      id: docRef?.id ?? recordId!,
+      id: docRef.id,
       employeeId: employee.id,
       employeeName: employee.name,
       date: normalizedDate,
@@ -492,12 +505,7 @@ class AppState extends ChangeNotifier {
       status: status,
     );
 
-    if (_useFirestore) {
-      await docRef!.set(attendance.toFirestore());
-    } else {
-      _attendanceRecords.add(attendance);
-      notifyListeners();
-    }
+    await docRef.set(attendance.toFirestore());
     return attendance;
   }
 
@@ -505,22 +513,16 @@ class AppState extends ChangeNotifier {
     String attendanceId,
     AttendanceStatus status,
   ) async {
-    if (_useFirestore) {
-      await _firestore
-          .collection('attendance')
-          .doc(attendanceId)
-          .update({'status': status.name});
-    } else {
-      for (final record in _attendanceRecords) {
-        if (record.id == attendanceId) {
-          if (record.status != status) {
-            record.status = status;
-            notifyListeners();
-          }
-          return;
-        }
-      }
+    if (!_useFirestore) {
+      throw const StateError(
+        'Unable to update attendance because Firestore is not available.',
+      );
     }
+
+    await _firestore
+        .collection('attendance')
+        .doc(attendanceId)
+        .update({'status': status.name});
   }
 
   List<Employee> get employees {
@@ -591,76 +593,6 @@ class AppState extends ChangeNotifier {
     }
     summaries.sort((a, b) => a.employee.name.compareTo(b.employee.name));
     return summaries;
-  }
-
-  void _seedData() {
-    final employeeOne = Employee(
-      id: 'EMP001',
-      name: 'Asha Patel',
-      username: 'asha',
-      totalSalary: 200,
-      scheduledStart: const TimeOfDay(hour: 9, minute: 0),
-      approveInTime: const TimeOfDay(hour: 9, minute: 15),
-      scheduledWorkingMinutes: 8 * 60,
-    );
-    final employeeTwo = Employee(
-      id: 'EMP002',
-      name: 'Rahul Sharma',
-      username: 'rahul',
-      totalSalary: 180,
-      scheduledStart: const TimeOfDay(hour: 10, minute: 0),
-      approveInTime: const TimeOfDay(hour: 10, minute: 15),
-      scheduledWorkingMinutes: 8 * 60,
-    );
-
-    _employees.addAll([employeeOne, employeeTwo]);
-
-    _attendanceRecords.addAll([
-      AttendanceRecord(
-        id: _nextAttendanceId(),
-        employeeId: employeeOne.id,
-        employeeName: employeeOne.name,
-        date: DateTime.now().subtract(const Duration(days: 1)),
-        inTime: const TimeOfDay(hour: 9, minute: 5),
-        outTime: const TimeOfDay(hour: 17, minute: 10),
-        task: 'Client reporting & status sync',
-        designation: 'Business Analyst',
-        approveInCutoff: employeeOne.approveInTime,
-        approveOutCutoff: employeeOne.approveOutTime,
-        status: AttendanceStatus.pending,
-      ),
-      AttendanceRecord(
-        id: _nextAttendanceId(),
-        employeeId: employeeOne.id,
-        employeeName: employeeOne.name,
-        date: DateTime.now().subtract(const Duration(days: 2)),
-        inTime: const TimeOfDay(hour: 9, minute: 0),
-        outTime: const TimeOfDay(hour: 17, minute: 0),
-        task: 'Requirements workshop',
-        designation: 'Business Analyst',
-        approveInCutoff: employeeOne.approveInTime,
-        approveOutCutoff: employeeOne.approveOutTime,
-        status: AttendanceStatus.approved,
-      ),
-      AttendanceRecord(
-        id: _nextAttendanceId(),
-        employeeId: employeeTwo.id,
-        employeeName: employeeTwo.name,
-        date: DateTime.now().subtract(const Duration(days: 1)),
-        inTime: const TimeOfDay(hour: 10, minute: 0),
-        outTime: const TimeOfDay(hour: 18, minute: 0),
-        task: 'Module implementation',
-        designation: 'Software Engineer',
-        approveInCutoff: employeeTwo.approveInTime,
-        approveOutCutoff: employeeTwo.approveOutTime,
-        status: AttendanceStatus.approved,
-      ),
-    ]);
-  }
-
-  String _nextAttendanceId() {
-    _attendanceSequence += 1;
-    return 'ATT${_attendanceSequence.toString().padLeft(4, '0')}';
   }
 }
 
