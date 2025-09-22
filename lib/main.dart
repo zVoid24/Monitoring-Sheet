@@ -1,11 +1,28 @@
+import 'dart:async';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
-void main() {
+import 'firebase_options.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  var firestoreAvailable = true;
+  try {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+  } on Exception catch (error) {
+    firestoreAvailable = false;
+    debugPrint('Firebase initialization failed: $error');
+  }
+
   runApp(
     ChangeNotifierProvider(
-      create: (_) => AppState(),
+      create: (_) => AppState(useFirestore: firestoreAvailable),
       child: const MonitoringSheetApp(),
     ),
   );
@@ -58,17 +75,62 @@ class Employee {
     required this.id,
     required this.name,
     required this.username,
+    required this.totalSalary,
     required this.scheduledStart,
-    required this.approveUntil,
-    required this.hourlySalary,
+    required this.approveInTime,
+    required this.scheduledWorkingMinutes,
   });
 
   final String id;
   final String name;
   final String username;
+  final double totalSalary;
   final TimeOfDay scheduledStart;
-  final TimeOfDay approveUntil;
-  final double hourlySalary;
+  final TimeOfDay approveInTime;
+  final int scheduledWorkingMinutes;
+
+  Duration get scheduledWorkingDuration =>
+      Duration(minutes: scheduledWorkingMinutes);
+
+  double get hourlyRate => scheduledWorkingMinutes == 0
+      ? 0
+      : totalSalary / (scheduledWorkingMinutes / 60);
+
+  TimeOfDay get approveOutTime =>
+      addMinutesToTimeOfDay(scheduledStart, scheduledWorkingMinutes);
+
+  Map<String, Object?> toFirestore() => {
+        'id': id,
+        'name': name,
+        'username': username,
+        'totalSalary': totalSalary,
+        'scheduledStartMinutes': timeOfDayToMinutes(scheduledStart),
+        'approveInMinutes': timeOfDayToMinutes(approveInTime),
+        'scheduledWorkingMinutes': scheduledWorkingMinutes,
+        'createdAt': FieldValue.serverTimestamp(),
+      };
+
+  factory Employee.fromFirestore(
+    DocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
+    final data = doc.data() ?? <String, dynamic>{};
+    return Employee(
+      id: (data['id'] as String?)?.trim().isNotEmpty == true
+          ? data['id'] as String
+          : doc.id,
+      name: (data['name'] as String?) ?? '',
+      username: (data['username'] as String?) ?? '',
+      totalSalary: (data['totalSalary'] as num?)?.toDouble() ?? 0,
+      scheduledStart: minutesToTimeOfDay(
+        (data['scheduledStartMinutes'] as num?)?.toInt() ?? 0,
+      ),
+      approveInTime: minutesToTimeOfDay(
+        (data['approveInMinutes'] as num?)?.toInt() ?? 0,
+      ),
+      scheduledWorkingMinutes:
+          (data['scheduledWorkingMinutes'] as num?)?.toInt() ?? 8 * 60,
+    );
+  }
 }
 
 class AttendanceRecord {
@@ -81,7 +143,8 @@ class AttendanceRecord {
     required this.outTime,
     required this.task,
     required this.designation,
-    required this.approveCutoff,
+    required this.approveInCutoff,
+    required this.approveOutCutoff,
     required this.status,
   });
 
@@ -93,7 +156,8 @@ class AttendanceRecord {
   final TimeOfDay outTime;
   final String task;
   final String designation;
-  final TimeOfDay approveCutoff;
+  final TimeOfDay approveInCutoff;
+  final TimeOfDay approveOutCutoff;
   AttendanceStatus status;
 
   int get workedMinutes =>
@@ -101,15 +165,69 @@ class AttendanceRecord {
 
   Duration get workedDuration => Duration(minutes: workedMinutes);
 
-  bool get beyondApproveTime =>
-      timeOfDayToMinutes(outTime) > timeOfDayToMinutes(approveCutoff);
+  bool get lateCheckIn =>
+      timeOfDayToMinutes(inTime) > timeOfDayToMinutes(approveInCutoff);
 
-  Duration get overtime => beyondApproveTime
+  Duration get lateBy => lateCheckIn
       ? Duration(
           minutes:
-              timeOfDayToMinutes(outTime) - timeOfDayToMinutes(approveCutoff),
+              timeOfDayToMinutes(inTime) - timeOfDayToMinutes(approveInCutoff),
         )
       : Duration.zero;
+
+  bool get beyondApprovedCheckout => timeOfDayToMinutes(outTime) >
+      timeOfDayToMinutes(approveOutCutoff);
+
+  Duration get overtime => beyondApprovedCheckout
+      ? Duration(
+          minutes:
+              timeOfDayToMinutes(outTime) - timeOfDayToMinutes(approveOutCutoff),
+        )
+      : Duration.zero;
+
+  bool get beyondApproveTime => lateCheckIn || beyondApprovedCheckout;
+
+  Map<String, Object?> toFirestore() => {
+        'id': id,
+        'employeeId': employeeId,
+        'employeeName': employeeName,
+        'date': Timestamp.fromDate(
+          DateTime(date.year, date.month, date.day),
+        ),
+        'inMinutes': timeOfDayToMinutes(inTime),
+        'outMinutes': timeOfDayToMinutes(outTime),
+        'task': task,
+        'designation': designation,
+        'approveInMinutes': timeOfDayToMinutes(approveInCutoff),
+        'approveOutMinutes': timeOfDayToMinutes(approveOutCutoff),
+        'status': status.name,
+        'createdAt': FieldValue.serverTimestamp(),
+      };
+
+  factory AttendanceRecord.fromFirestore(
+    QueryDocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
+    final data = doc.data();
+    final timestamp = data['date'];
+    final date = timestamp is Timestamp
+        ? timestamp.toDate()
+        : DateTime.now();
+    return AttendanceRecord(
+      id: doc.id,
+      employeeId: (data['employeeId'] as String?) ?? '',
+      employeeName: (data['employeeName'] as String?) ?? '',
+      date: DateTime(date.year, date.month, date.day),
+      inTime: minutesToTimeOfDay((data['inMinutes'] as num?)?.toInt() ?? 0),
+      outTime: minutesToTimeOfDay((data['outMinutes'] as num?)?.toInt() ?? 0),
+      task: (data['task'] as String?) ?? '',
+      designation: (data['designation'] as String?) ?? '',
+      approveInCutoff:
+          minutesToTimeOfDay((data['approveInMinutes'] as num?)?.toInt() ?? 0),
+      approveOutCutoff:
+          minutesToTimeOfDay((data['approveOutMinutes'] as num?)?.toInt() ?? 0),
+      status: attendanceStatusFromString((data['status'] as String?) ?? ''),
+    );
+  }
 }
 
 class EmployeeHoursSummary {
@@ -133,13 +251,26 @@ class EmployeeHoursSummary {
 
   double get approvedHours => approvedMinutes / 60.0;
 
-  double get estimatedPayroll => approvedHours * employee.hourlySalary;
+  double get estimatedPayroll => approvedHours * employee.hourlyRate;
 }
 
 class AppState extends ChangeNotifier {
-  AppState() {
-    _seedData();
+  AppState({
+    bool useFirestore = true,
+    FirebaseFirestore? firestore,
+  })  : _useFirestore = useFirestore,
+        _firestore = firestore ?? FirebaseFirestore.instance {
+    if (_useFirestore) {
+      _initializeFirestoreListeners();
+    } else {
+      _seedData();
+      _employeesLoaded = true;
+      _attendanceLoaded = true;
+    }
   }
+
+  final bool _useFirestore;
+  final FirebaseFirestore _firestore;
 
   final List<ManagementAccount> _managementAccounts = const [
     ManagementAccount(
@@ -151,71 +282,80 @@ class AppState extends ChangeNotifier {
 
   final List<Employee> _employees = [];
   final List<AttendanceRecord> _attendanceRecords = [];
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
+      _employeesSubscription;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
+      _attendanceSubscription;
+  bool _employeesLoaded = false;
+  bool _attendanceLoaded = false;
+  String? _loadError;
   int _attendanceSequence = 0;
 
-  void _seedData() {
-    final Employee employeeOne = Employee(
-      id: 'EMP001',
-      name: 'Asha Patel',
-      username: 'asha',
-      scheduledStart: const TimeOfDay(hour: 9, minute: 0),
-      approveUntil: const TimeOfDay(hour: 17, minute: 0),
-      hourlySalary: 28,
-    );
-    final Employee employeeTwo = Employee(
-      id: 'EMP002',
-      name: 'Rahul Sharma',
-      username: 'rahul',
-      scheduledStart: const TimeOfDay(hour: 10, minute: 0),
-      approveUntil: const TimeOfDay(hour: 18, minute: 0),
-      hourlySalary: 24,
+  bool get usesFirestore => _useFirestore;
+
+  bool get isLoading =>
+      _useFirestore && (!_employeesLoaded || !_attendanceLoaded);
+
+  bool get hasLoadError => _loadError != null;
+
+  String? get loadError => _loadError;
+
+  void _initializeFirestoreListeners() {
+    _employeesSubscription = _firestore
+        .collection('employees')
+        .snapshots()
+        .listen(
+      (snapshot) {
+        _employees
+          ..clear();
+        for (final doc in snapshot.docs) {
+          try {
+            _employees.add(Employee.fromFirestore(doc));
+          } catch (error) {
+            debugPrint('Failed to parse employee ${doc.id}: $error');
+          }
+        }
+        _employeesLoaded = true;
+        _loadError = null;
+        notifyListeners();
+      },
+      onError: _handleFirestoreError,
     );
 
-    _employees.addAll([employeeOne, employeeTwo]);
-
-    _attendanceRecords.addAll([
-      AttendanceRecord(
-        id: _nextAttendanceId(),
-        employeeId: employeeOne.id,
-        employeeName: employeeOne.name,
-        date: DateTime.now().subtract(const Duration(days: 1)),
-        inTime: const TimeOfDay(hour: 9, minute: 5),
-        outTime: const TimeOfDay(hour: 17, minute: 10),
-        task: 'Client reporting & status sync',
-        designation: 'Business Analyst',
-        approveCutoff: employeeOne.approveUntil,
-        status: AttendanceStatus.pending,
-      ),
-      AttendanceRecord(
-        id: _nextAttendanceId(),
-        employeeId: employeeOne.id,
-        employeeName: employeeOne.name,
-        date: DateTime.now().subtract(const Duration(days: 2)),
-        inTime: const TimeOfDay(hour: 9, minute: 0),
-        outTime: const TimeOfDay(hour: 17, minute: 0),
-        task: 'Requirements workshop',
-        designation: 'Business Analyst',
-        approveCutoff: employeeOne.approveUntil,
-        status: AttendanceStatus.approved,
-      ),
-      AttendanceRecord(
-        id: _nextAttendanceId(),
-        employeeId: employeeTwo.id,
-        employeeName: employeeTwo.name,
-        date: DateTime.now().subtract(const Duration(days: 1)),
-        inTime: const TimeOfDay(hour: 10, minute: 0),
-        outTime: const TimeOfDay(hour: 17, minute: 30),
-        task: 'Module implementation',
-        designation: 'Software Engineer',
-        approveCutoff: employeeTwo.approveUntil,
-        status: AttendanceStatus.approved,
-      ),
-    ]);
+    _attendanceSubscription = _firestore
+        .collection('attendance')
+        .snapshots()
+        .listen(
+      (snapshot) {
+        _attendanceRecords
+          ..clear();
+        for (final doc in snapshot.docs) {
+          try {
+            _attendanceRecords.add(AttendanceRecord.fromFirestore(doc));
+          } catch (error) {
+            debugPrint('Failed to parse attendance ${doc.id}: $error');
+          }
+        }
+        _attendanceLoaded = true;
+        _loadError = null;
+        notifyListeners();
+      },
+      onError: _handleFirestoreError,
+    );
   }
 
-  String _nextAttendanceId() {
-    _attendanceSequence += 1;
-    return 'ATT${_attendanceSequence.toString().padLeft(4, '0')}';
+  void _handleFirestoreError(Object error, StackTrace stackTrace) {
+    debugPrint('Firestore listener error: $error');
+    _loadError =
+        'Unable to load data from Firestore. Please check your Firebase configuration.';
+    notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _employeesSubscription?.cancel();
+    _attendanceSubscription?.cancel();
+    super.dispose();
   }
 
   ManagementAccount? authenticateManager(String username, String password) {
@@ -230,24 +370,26 @@ class AppState extends ChangeNotifier {
   }
 
   Employee? authenticateEmployee(String id, String username) {
+    final normalizedId = id.trim().toLowerCase();
+    final normalizedUsername = username.trim().toLowerCase();
     for (final employee in _employees) {
-      if (employee.id.trim().toLowerCase() == id.trim().toLowerCase() &&
-          employee.username.trim().toLowerCase() ==
-              username.trim().toLowerCase()) {
+      if (employee.id.trim().toLowerCase() == normalizedId &&
+          employee.username.trim().toLowerCase() == normalizedUsername) {
         return employee;
       }
     }
     return null;
   }
 
-  Employee addEmployee({
+  Future<Employee> addEmployee({
     required String id,
     required String name,
     required String username,
+    required double totalSalary,
     required TimeOfDay scheduledStart,
-    required TimeOfDay approveUntil,
-    required double hourlySalary,
-  }) {
+    required TimeOfDay approveInTime,
+    required int scheduledWorkingMinutes,
+  }) async {
     final trimmedId = id.trim();
     final trimmedName = name.trim();
     final trimmedUsername = username.trim();
@@ -261,6 +403,20 @@ class AppState extends ChangeNotifier {
     if (trimmedUsername.isEmpty) {
       throw const ValidationException('Username is required.');
     }
+    if (totalSalary <= 0) {
+      throw const ValidationException(
+          'Total salary must be greater than zero.');
+    }
+    if (scheduledWorkingMinutes <= 0) {
+      throw const ValidationException(
+          'Scheduled working hours must be greater than zero.');
+    }
+    if (timeOfDayToMinutes(approveInTime) <
+        timeOfDayToMinutes(scheduledStart)) {
+      throw const ValidationException(
+        'Approve in time cannot be earlier than the scheduled start time.',
+      );
+    }
     if (_employees.any(
       (employee) => employee.id.toLowerCase() == trimmedId.toLowerCase(),
     )) {
@@ -270,39 +426,38 @@ class AppState extends ChangeNotifier {
       (employee) => employee.username.toLowerCase() ==
           trimmedUsername.toLowerCase(),
     )) {
-      throw ValidationException('Username "$trimmedUsername" is already in use.');
-    }
-    if (timeOfDayToMinutes(approveUntil) <=
-        timeOfDayToMinutes(scheduledStart)) {
-      throw const ValidationException(
-        'Approve time must be after the scheduled start time.',
-      );
-    }
-    if (hourlySalary <= 0) {
-      throw const ValidationException('Salary must be greater than zero.');
+      throw ValidationException(
+          'Username "$trimmedUsername" is already in use.');
     }
 
     final employee = Employee(
       id: trimmedId,
       name: trimmedName,
       username: trimmedUsername,
+      totalSalary: totalSalary,
       scheduledStart: scheduledStart,
-      approveUntil: approveUntil,
-      hourlySalary: hourlySalary,
+      approveInTime: approveInTime,
+      scheduledWorkingMinutes: scheduledWorkingMinutes,
     );
-    _employees.add(employee);
-    notifyListeners();
+
+    if (_useFirestore) {
+      final docRef = _firestore.collection('employees').doc(trimmedId);
+      await docRef.set(employee.toFirestore());
+    } else {
+      _employees.add(employee);
+      notifyListeners();
+    }
     return employee;
   }
 
-  AttendanceRecord addAttendance({
+  Future<AttendanceRecord> addAttendance({
     required Employee employee,
     required DateTime date,
     required TimeOfDay inTime,
     required TimeOfDay outTime,
     required String task,
     required String designation,
-  }) {
+  }) async {
     final cleanedTask = task.trim();
     final cleanedDesignation = designation.trim();
     if (cleanedTask.isEmpty) {
@@ -317,11 +472,19 @@ class AppState extends ChangeNotifier {
     }
 
     final normalizedDate = DateTime(date.year, date.month, date.day);
-    final isPending =
-        timeOfDayToMinutes(outTime) > timeOfDayToMinutes(employee.approveUntil);
+    final lateCheckIn =
+        timeOfDayToMinutes(inTime) > timeOfDayToMinutes(employee.approveInTime);
+    final exceededCheckout = timeOfDayToMinutes(outTime) >
+        timeOfDayToMinutes(employee.approveOutTime);
+    final status = (lateCheckIn || exceededCheckout)
+        ? AttendanceStatus.pending
+        : AttendanceStatus.approved;
 
-    final record = AttendanceRecord(
-      id: _nextAttendanceId(),
+    final recordId = _useFirestore ? null : _nextAttendanceId();
+    final docRef =
+        _useFirestore ? _firestore.collection('attendance').doc() : null;
+    final attendance = AttendanceRecord(
+      id: docRef?.id ?? recordId!,
       employeeId: employee.id,
       employeeName: employee.name,
       date: normalizedDate,
@@ -329,28 +492,47 @@ class AppState extends ChangeNotifier {
       outTime: outTime,
       task: cleanedTask,
       designation: cleanedDesignation,
-      approveCutoff: employee.approveUntil,
-      status: isPending ? AttendanceStatus.pending : AttendanceStatus.approved,
+      approveInCutoff: employee.approveInTime,
+      approveOutCutoff: employee.approveOutTime,
+      status: status,
     );
 
-    _attendanceRecords.add(record);
-    notifyListeners();
-    return record;
+    if (_useFirestore) {
+      await docRef!.set(attendance.toFirestore());
+    } else {
+      _attendanceRecords.add(attendance);
+      notifyListeners();
+    }
+    return attendance;
   }
 
-  void updateAttendanceStatus(String attendanceId, AttendanceStatus status) {
-    for (final record in _attendanceRecords) {
-      if (record.id == attendanceId) {
-        if (record.status != status) {
-          record.status = status;
-          notifyListeners();
+  Future<void> updateAttendanceStatus(
+    String attendanceId,
+    AttendanceStatus status,
+  ) async {
+    if (_useFirestore) {
+      await _firestore
+          .collection('attendance')
+          .doc(attendanceId)
+          .update({'status': status.name});
+    } else {
+      for (final record in _attendanceRecords) {
+        if (record.id == attendanceId) {
+          if (record.status != status) {
+            record.status = status;
+            notifyListeners();
+          }
+          return;
         }
-        return;
       }
     }
   }
 
-  List<Employee> get employees => List.unmodifiable(_employees);
+  List<Employee> get employees {
+    final list = List<Employee>.from(_employees);
+    list.sort((a, b) => a.name.compareTo(b.name));
+    return list;
+  }
 
   List<AttendanceRecord> get attendanceRecords {
     final records = List<AttendanceRecord>.from(_attendanceRecords);
@@ -365,8 +547,9 @@ class AppState extends ChangeNotifier {
   }
 
   List<AttendanceRecord> attendanceForEmployee(String employeeId) {
-    final records =
-        _attendanceRecords.where((record) => record.employeeId == employeeId).toList();
+    final records = _attendanceRecords
+        .where((record) => record.employeeId == employeeId)
+        .toList();
     records.sort((a, b) => b.date.compareTo(a.date));
     return records;
   }
@@ -377,9 +560,7 @@ class AppState extends ChangeNotifier {
 
   int get totalEmployees => _employees.length;
 
-  int get pendingAttendanceCount => _attendanceRecords
-      .where((record) => record.status == AttendanceStatus.pending)
-      .length;
+  int get pendingAttendanceCount => pendingAttendance.length;
 
   Duration get totalApprovedDuration {
     final totalMinutes = _attendanceRecords
@@ -397,8 +578,10 @@ class AppState extends ChangeNotifier {
           .fold<int>(0, (sum, record) => sum + record.workedMinutes);
       final pendingRecords =
           records.where((record) => record.status == AttendanceStatus.pending);
-      final pendingMinutes =
-          pendingRecords.fold<int>(0, (sum, record) => sum + record.workedMinutes);
+      final pendingMinutes = pendingRecords.fold<int>(
+        0,
+        (sum, record) => sum + record.workedMinutes,
+      );
       summaries.add(
         EmployeeHoursSummary(
           employee: employee,
@@ -413,6 +596,76 @@ class AppState extends ChangeNotifier {
     }
     summaries.sort((a, b) => a.employee.name.compareTo(b.employee.name));
     return summaries;
+  }
+
+  void _seedData() {
+    final employeeOne = Employee(
+      id: 'EMP001',
+      name: 'Asha Patel',
+      username: 'asha',
+      totalSalary: 200,
+      scheduledStart: const TimeOfDay(hour: 9, minute: 0),
+      approveInTime: const TimeOfDay(hour: 9, minute: 15),
+      scheduledWorkingMinutes: 8 * 60,
+    );
+    final employeeTwo = Employee(
+      id: 'EMP002',
+      name: 'Rahul Sharma',
+      username: 'rahul',
+      totalSalary: 180,
+      scheduledStart: const TimeOfDay(hour: 10, minute: 0),
+      approveInTime: const TimeOfDay(hour: 10, minute: 15),
+      scheduledWorkingMinutes: 8 * 60,
+    );
+
+    _employees.addAll([employeeOne, employeeTwo]);
+
+    _attendanceRecords.addAll([
+      AttendanceRecord(
+        id: _nextAttendanceId(),
+        employeeId: employeeOne.id,
+        employeeName: employeeOne.name,
+        date: DateTime.now().subtract(const Duration(days: 1)),
+        inTime: const TimeOfDay(hour: 9, minute: 5),
+        outTime: const TimeOfDay(hour: 17, minute: 10),
+        task: 'Client reporting & status sync',
+        designation: 'Business Analyst',
+        approveInCutoff: employeeOne.approveInTime,
+        approveOutCutoff: employeeOne.approveOutTime,
+        status: AttendanceStatus.pending,
+      ),
+      AttendanceRecord(
+        id: _nextAttendanceId(),
+        employeeId: employeeOne.id,
+        employeeName: employeeOne.name,
+        date: DateTime.now().subtract(const Duration(days: 2)),
+        inTime: const TimeOfDay(hour: 9, minute: 0),
+        outTime: const TimeOfDay(hour: 17, minute: 0),
+        task: 'Requirements workshop',
+        designation: 'Business Analyst',
+        approveInCutoff: employeeOne.approveInTime,
+        approveOutCutoff: employeeOne.approveOutTime,
+        status: AttendanceStatus.approved,
+      ),
+      AttendanceRecord(
+        id: _nextAttendanceId(),
+        employeeId: employeeTwo.id,
+        employeeName: employeeTwo.name,
+        date: DateTime.now().subtract(const Duration(days: 1)),
+        inTime: const TimeOfDay(hour: 10, minute: 0),
+        outTime: const TimeOfDay(hour: 18, minute: 0),
+        task: 'Module implementation',
+        designation: 'Software Engineer',
+        approveInCutoff: employeeTwo.approveInTime,
+        approveOutCutoff: employeeTwo.approveOutTime,
+        status: AttendanceStatus.approved,
+      ),
+    ]);
+  }
+
+  String _nextAttendanceId() {
+    _attendanceSequence += 1;
+    return 'ATT${_attendanceSequence.toString().padLeft(4, '0')}';
   }
 }
 
@@ -434,6 +687,19 @@ String formatDuration(Duration duration) {
 
 int timeOfDayToMinutes(TimeOfDay time) => time.hour * 60 + time.minute;
 
+TimeOfDay minutesToTimeOfDay(int minutes) {
+  final totalMinutes = minutes % (24 * 60);
+  final normalized = totalMinutes < 0 ? totalMinutes + 24 * 60 : totalMinutes;
+  final hours = normalized ~/ 60;
+  final remainingMinutes = normalized % 60;
+  return TimeOfDay(hour: hours, minute: remainingMinutes);
+}
+
+TimeOfDay addMinutesToTimeOfDay(TimeOfDay time, int minutesToAdd) {
+  final total = timeOfDayToMinutes(time) + minutesToAdd;
+  return minutesToTimeOfDay(total);
+}
+
 String describeStatus(AttendanceStatus status) {
   switch (status) {
     case AttendanceStatus.pending:
@@ -442,6 +708,23 @@ String describeStatus(AttendanceStatus status) {
       return 'Approved';
     case AttendanceStatus.declined:
       return 'Declined';
+  }
+}
+
+AttendanceStatus attendanceStatusFromString(String value) {
+  final normalized = value.trim().toLowerCase();
+  for (final status in AttendanceStatus.values) {
+    if (status.name == normalized) {
+      return status;
+    }
+  }
+  switch (normalized) {
+    case 'approved':
+      return AttendanceStatus.approved;
+    case 'declined':
+      return AttendanceStatus.declined;
+    default:
+      return AttendanceStatus.pending;
   }
 }
 
@@ -539,6 +822,64 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final appState = context.watch<AppState>();
+
+    if (appState.isLoading) {
+      return const Scaffold(
+        body: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 16),
+              Text('Connecting to the attendance database...'),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (appState.hasLoadError) {
+      return Scaffold(
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.error_outline,
+                  size: 64,
+                  color: theme.colorScheme.error,
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  'Unable to load data from Firestore.',
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    color: theme.colorScheme.error,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                if (appState.loadError != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    appState.loadError!,
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+                const SizedBox(height: 16),
+                Text(
+                  'Please verify your Firebase configuration and restart the app.',
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodyMedium,
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     return Scaffold(
       body: Center(
         child: SingleChildScrollView(
@@ -758,7 +1099,7 @@ class EmployeeHomeScreen extends StatelessWidget {
               .fold<int>(0, (sum, record) => sum + record.workedMinutes);
           final approvedDuration = Duration(minutes: approvedMinutes);
           final estimatedPayroll =
-              (approvedMinutes / 60.0) * employee.hourlySalary;
+              (approvedMinutes / 60.0) * employee.hourlyRate;
 
           return ListView(
             padding: const EdgeInsets.all(16),
@@ -778,7 +1119,16 @@ class EmployeeHomeScreen extends StatelessWidget {
                         'Shift: ${formatEmployeeShift(context, employee)}',
                       ),
                       Text(
-                        'Hourly salary: ${employee.hourlySalary.toStringAsFixed(2)}',
+                        'Approve in time: ${MaterialLocalizations.of(context).formatTimeOfDay(employee.approveInTime)}',
+                      ),
+                      Text(
+                        'Scheduled hours: ${formatDuration(employee.scheduledWorkingDuration)}',
+                      ),
+                      Text(
+                        'Total salary per shift: ${employee.totalSalary.toStringAsFixed(2)}',
+                      ),
+                      Text(
+                        'Hourly rate: ${employee.hourlyRate.toStringAsFixed(2)}',
                       ),
                       const Divider(height: 24),
                       Text(
@@ -820,7 +1170,7 @@ class EmployeeHomeScreen extends StatelessWidget {
 String formatEmployeeShift(BuildContext context, Employee employee) {
   final localizations = MaterialLocalizations.of(context);
   final start = localizations.formatTimeOfDay(employee.scheduledStart);
-  final end = localizations.formatTimeOfDay(employee.approveUntil);
+  final end = localizations.formatTimeOfDay(employee.approveOutTime);
   return '$start - $end';
 }
 
@@ -898,7 +1248,16 @@ class ManagementOverviewTab extends StatelessWidget {
                           'Shift: ${formatEmployeeShift(context, summary.employee)}',
                         ),
                         Text(
-                          'Hourly salary: ${summary.employee.hourlySalary.toStringAsFixed(2)}',
+                          'Approve in time: ${MaterialLocalizations.of(context).formatTimeOfDay(summary.employee.approveInTime)}',
+                        ),
+                        Text(
+                          'Scheduled hours: ${formatDuration(summary.employee.scheduledWorkingDuration)}',
+                        ),
+                        Text(
+                          'Total salary per shift: ${summary.employee.totalSalary.toStringAsFixed(2)}',
+                        ),
+                        Text(
+                          'Hourly rate: ${summary.employee.hourlyRate.toStringAsFixed(2)}',
                         ),
                         const SizedBox(height: 12),
                         Wrap(
@@ -1036,10 +1395,18 @@ class EmployeeManagementTab extends StatelessWidget {
                         Text('Username: ${employee.username}'),
                         Text('Scheduled start: '
                             '${MaterialLocalizations.of(context).formatTimeOfDay(employee.scheduledStart)}'),
-                        Text('Approve until: '
-                            '${MaterialLocalizations.of(context).formatTimeOfDay(employee.approveUntil)}'),
+                        Text('Approve in time: '
+                            '${MaterialLocalizations.of(context).formatTimeOfDay(employee.approveInTime)}'),
+                        Text('Approve out time: '
+                            '${MaterialLocalizations.of(context).formatTimeOfDay(employee.approveOutTime)}'),
                         Text(
-                          'Hourly salary: ${employee.hourlySalary.toStringAsFixed(2)}',
+                          'Scheduled hours: ${formatDuration(employee.scheduledWorkingDuration)}',
+                        ),
+                        Text(
+                          'Total salary per shift: ${employee.totalSalary.toStringAsFixed(2)}',
+                        ),
+                        Text(
+                          'Hourly rate: ${employee.hourlyRate.toStringAsFixed(2)}',
                         ),
                       ],
                     ),
@@ -1116,33 +1483,69 @@ class _AttendanceManagementTabState extends State<AttendanceManagementTab> {
                   record: record,
                   showEmployeeName: true,
                   onApprove: record.status == AttendanceStatus.pending
-                      ? () {
-                          context.read<AppState>().updateAttendanceStatus(
-                                record.id,
-                                AttendanceStatus.approved,
-                              );
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text(
-                                'Attendance ${record.id} approved.',
+                      ? () async {
+                          try {
+                            await context
+                                .read<AppState>()
+                                .updateAttendanceStatus(
+                                  record.id,
+                                  AttendanceStatus.approved,
+                                );
+                            if (!mounted) {
+                              return;
+                            }
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  'Attendance ${record.id} approved.',
+                                ),
                               ),
-                            ),
-                          );
+                            );
+                          } catch (error) {
+                            if (!mounted) {
+                              return;
+                            }
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  'Failed to approve attendance. $error',
+                                ),
+                              ),
+                            );
+                          }
                         }
                       : null,
                   onDecline: record.status == AttendanceStatus.pending
-                      ? () {
-                          context.read<AppState>().updateAttendanceStatus(
-                                record.id,
-                                AttendanceStatus.declined,
-                              );
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text(
-                                'Attendance ${record.id} declined.',
+                      ? () async {
+                          try {
+                            await context
+                                .read<AppState>()
+                                .updateAttendanceStatus(
+                                  record.id,
+                                  AttendanceStatus.declined,
+                                );
+                            if (!mounted) {
+                              return;
+                            }
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  'Attendance ${record.id} declined.',
+                                ),
                               ),
-                            ),
-                          );
+                            );
+                          } catch (error) {
+                            if (!mounted) {
+                              return;
+                            }
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  'Failed to decline attendance. $error',
+                                ),
+                              ),
+                            );
+                          }
                         }
                       : null,
                 ),
@@ -1167,17 +1570,21 @@ class _AddEmployeeDialogState extends State<AddEmployeeDialog> {
   final TextEditingController _idController = TextEditingController();
   final TextEditingController _nameController = TextEditingController();
   final TextEditingController _usernameController = TextEditingController();
-  final TextEditingController _salaryController = TextEditingController();
+  final TextEditingController _totalSalaryController = TextEditingController();
+  final TextEditingController _scheduledHoursController =
+      TextEditingController();
   TimeOfDay? _scheduledStart;
-  TimeOfDay? _approveUntil;
+  TimeOfDay? _approveInTime;
   String? _formError;
+  bool _isSubmitting = false;
 
   @override
   void dispose() {
     _idController.dispose();
     _nameController.dispose();
     _usernameController.dispose();
-    _salaryController.dispose();
+    _totalSalaryController.dispose();
+    _scheduledHoursController.dispose();
     super.dispose();
   }
 
@@ -1193,53 +1600,74 @@ class _AddEmployeeDialogState extends State<AddEmployeeDialog> {
     }
   }
 
-  Future<void> _pickApproveUntil() async {
+  Future<void> _pickApproveInTime() async {
     final selected = await showTimePicker(
       context: context,
-      initialTime: _approveUntil ?? const TimeOfDay(hour: 17, minute: 0),
+      initialTime: _approveInTime ?? const TimeOfDay(hour: 9, minute: 30),
     );
     if (selected != null) {
       setState(() {
-        _approveUntil = selected;
+        _approveInTime = selected;
       });
     }
   }
 
-  void _submit() {
+  Future<void> _submit() async {
     setState(() {
       _formError = null;
     });
     if (!_formKey.currentState!.validate()) {
       return;
     }
-    if (_scheduledStart == null || _approveUntil == null) {
+    if (_scheduledStart == null || _approveInTime == null) {
       setState(() {
-        _formError = 'Scheduled start and approve time are required.';
+        _formError = 'Scheduled start and approve in time are required.';
       });
       return;
     }
-    final salary = double.tryParse(_salaryController.text.trim());
-    if (salary == null) {
+    final totalSalary = double.tryParse(_totalSalaryController.text.trim());
+    if (totalSalary == null) {
       setState(() {
-        _formError = 'Enter a valid salary amount.';
+        _formError = 'Enter a valid total salary amount.';
+      });
+      return;
+    }
+    final scheduledHours =
+        double.tryParse(_scheduledHoursController.text.trim());
+    if (scheduledHours == null) {
+      setState(() {
+        _formError = 'Enter the scheduled working hours (e.g. 8).';
       });
       return;
     }
 
     try {
-      final employee = context.read<AppState>().addEmployee(
+      setState(() {
+        _isSubmitting = true;
+      });
+      final employee = await context.read<AppState>().addEmployee(
             id: _idController.text,
             name: _nameController.text,
             username: _usernameController.text,
             scheduledStart: _scheduledStart!,
-            approveUntil: _approveUntil!,
-            hourlySalary: salary,
+            approveInTime: _approveInTime!,
+            totalSalary: totalSalary,
+            scheduledWorkingMinutes: (scheduledHours * 60).round(),
           );
+      if (!mounted) {
+        return;
+      }
       Navigator.of(context).pop(employee);
     } on ValidationException catch (error) {
       setState(() {
         _formError = error.message;
       });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSubmitting = false;
+        });
+      }
     }
   }
 
@@ -1288,12 +1716,27 @@ class _AddEmployeeDialogState extends State<AddEmployeeDialog> {
                 },
               ),
               TextFormField(
-                controller: _salaryController,
-                decoration: const InputDecoration(labelText: 'Hourly salary'),
+                controller: _totalSalaryController,
+                decoration:
+                    const InputDecoration(labelText: 'Total salary per shift'),
                 keyboardType: TextInputType.number,
                 validator: (value) {
                   if (value == null || value.trim().isEmpty) {
-                    return 'Salary is required';
+                    return 'Total salary is required';
+                  }
+                  return null;
+                },
+              ),
+              TextFormField(
+                controller: _scheduledHoursController,
+                decoration: const InputDecoration(
+                  labelText: 'Scheduled working hours',
+                  helperText: 'Enter hours such as 8 or 8.5',
+                ),
+                keyboardType: TextInputType.numberWithOptions(decimal: true),
+                validator: (value) {
+                  if (value == null || value.trim().isEmpty) {
+                    return 'Scheduled working hours are required';
                   }
                   return null;
                 },
@@ -1318,15 +1761,20 @@ class _AddEmployeeDialogState extends State<AddEmployeeDialog> {
                 children: [
                   Expanded(
                     child: OutlinedButton(
-                      onPressed: _pickApproveUntil,
+                      onPressed: _pickApproveInTime,
                       child: Text(
-                        _approveUntil == null
-                            ? 'Select approve time'
-                            : 'Approve until: ${MaterialLocalizations.of(context).formatTimeOfDay(_approveUntil!)}',
+                        _approveInTime == null
+                            ? 'Select approve in time'
+                            : 'Approve in by: ${MaterialLocalizations.of(context).formatTimeOfDay(_approveInTime!)}',
                       ),
                     ),
                   ),
                 ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Employees who check in after the approve-in time will have their attendance marked pending automatically.',
+                style: theme.textTheme.bodySmall,
               ),
               if (_formError != null)
                 Padding(
@@ -1346,8 +1794,14 @@ class _AddEmployeeDialogState extends State<AddEmployeeDialog> {
           child: const Text('Cancel'),
         ),
         FilledButton(
-          onPressed: _submit,
-          child: const Text('Create'),
+          onPressed: _isSubmitting ? null : _submit,
+          child: _isSubmitting
+              ? const SizedBox(
+                  height: 20,
+                  width: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text('Create'),
         ),
       ],
     );
@@ -1371,13 +1825,14 @@ class _AddAttendanceDialogState extends State<AddAttendanceDialog> {
   final TextEditingController _taskController = TextEditingController();
   final TextEditingController _designationController = TextEditingController();
   String? _formError;
+  bool _isSubmitting = false;
 
   @override
   void initState() {
     super.initState();
     _selectedDate = DateTime.now();
     _inTime = widget.employee.scheduledStart;
-    _outTime = widget.employee.approveUntil;
+    _outTime = widget.employee.approveOutTime;
   }
 
   @override
@@ -1426,7 +1881,7 @@ class _AddAttendanceDialogState extends State<AddAttendanceDialog> {
     }
   }
 
-  void _submit() {
+  Future<void> _submit() async {
     setState(() {
       _formError = null;
     });
@@ -1434,7 +1889,10 @@ class _AddAttendanceDialogState extends State<AddAttendanceDialog> {
       return;
     }
     try {
-      final record = context.read<AppState>().addAttendance(
+      setState(() {
+        _isSubmitting = true;
+      });
+      final record = await context.read<AppState>().addAttendance(
             employee: widget.employee,
             date: _selectedDate,
             inTime: _inTime,
@@ -1442,11 +1900,20 @@ class _AddAttendanceDialogState extends State<AddAttendanceDialog> {
             task: _taskController.text,
             designation: _designationController.text,
           );
+      if (!mounted) {
+        return;
+      }
       Navigator.of(context).pop(record);
     } on ValidationException catch (error) {
       setState(() {
         _formError = error.message;
       });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSubmitting = false;
+        });
+      }
     }
   }
 
@@ -1523,8 +1990,9 @@ class _AddAttendanceDialogState extends State<AddAttendanceDialog> {
                 ),
               const SizedBox(height: 8),
               Text(
-                'Attendance is automatically marked pending if the checkout time is later than '
-                '${localizations.formatTimeOfDay(widget.employee.approveUntil)}.',
+                'Attendance is automatically marked pending if the check-in time is later than '
+                '${localizations.formatTimeOfDay(widget.employee.approveInTime)} or the checkout time is after '
+                '${localizations.formatTimeOfDay(widget.employee.approveOutTime)}.',
                 style: theme.textTheme.bodySmall,
               ),
             ],
@@ -1537,8 +2005,14 @@ class _AddAttendanceDialogState extends State<AddAttendanceDialog> {
           child: const Text('Cancel'),
         ),
         FilledButton(
-          onPressed: _submit,
-          child: const Text('Submit'),
+          onPressed: _isSubmitting ? null : _submit,
+          child: _isSubmitting
+              ? const SizedBox(
+                  height: 20,
+                  width: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Text('Submit'),
         ),
       ],
     );
@@ -1601,10 +2075,11 @@ class AttendanceCard extends StatelessWidget {
             ),
             Text('Task: ${record.task}'),
             Text('Designation: ${record.designation}'),
-            if (record.beyondApproveTime)
+            if (record.lateCheckIn || record.beyondApprovedCheckout)
               Padding(
                 padding: const EdgeInsets.only(top: 8),
                 child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Icon(
                       Icons.warning_amber_rounded,
@@ -1612,10 +2087,22 @@ class AttendanceCard extends StatelessWidget {
                     ),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: Text(
-                        'Submitted after the approved time window. '
-                        '${record.overtime.inMinutes} minutes overtime.',
-                        style: theme.textTheme.bodySmall,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (record.lateCheckIn)
+                            Text(
+                              'Checked in after ${localizations.formatTimeOfDay(record.approveInCutoff)} '
+                              'by ${formatDuration(record.lateBy)}.',
+                              style: theme.textTheme.bodySmall,
+                            ),
+                          if (record.beyondApprovedCheckout)
+                            Text(
+                              'Checked out after ${localizations.formatTimeOfDay(record.approveOutCutoff)} '
+                              'by ${formatDuration(record.overtime)}.',
+                              style: theme.textTheme.bodySmall,
+                            ),
+                        ],
                       ),
                     ),
                   ],
