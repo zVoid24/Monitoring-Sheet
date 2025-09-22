@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "401251291991",
+    "project_id": "monitoring-sheet-b72bd",
+    "storage_bucket": "monitoring-sheet-b72bd.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:401251291991:android:564c6c3584e62c6cab6412",
+        "android_client_info": {
+          "package_name": "com.example.monitoring_sheet"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAlX4w0DDeApcPHKTLhXA4te3JcWafxsEA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
